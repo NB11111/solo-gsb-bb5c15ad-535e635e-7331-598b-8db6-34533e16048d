@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from . import database
 from .errors import MIMEParseError
 from .mimeparser import fingerprint, parse_message, raw_sha256
+from .related import build_related_resources
 from .schemas import (
     AttachmentListResponse,
     AttachmentOccurrence,
@@ -28,6 +29,7 @@ from .schemas import (
     NodeDetailResponse,
     NodeListResponse,
     NodeSummary,
+    RelatedResourcesResponse,
     TreeNode,
     TreeResponse,
 )
@@ -59,7 +61,7 @@ app = FastAPI(
         "非文本叶子的解码字节按 SHA-256 去重进入内容寻址附件库，"
         "支持分页检索与带 Range 的下载。"
     ),
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -280,6 +282,38 @@ def get_node(
     )
     return NodeDetailResponse(
         id=message_id, fingerprint=msg["fingerprint"], node=detail
+    )
+
+
+@app.get(
+    "/messages/{message_id}/related-resources",
+    response_model=RelatedResourcesResponse,
+)
+def get_related_resources(
+    message_id: int,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> RelatedResourcesResponse:
+    """审计 text/html 叶子对 ``cid:`` 内嵌资源的引用。
+
+    从每个 ``text/html`` 叶子已解码文本的 ``src``、``href``、
+    ``poster``、``srcset`` 属性提取 ``cid:`` URL（RFC 2392 百分号
+    解码），以**最近的 multipart/related 祖先**为作用域匹配
+    Content-ID：不跨相邻 sibling 作用域，也不跨嵌套的父子作用域。
+    每条引用给出源/目标节点路径与 ``resolved`` / ``missing`` /
+    ``ambiguous`` 状态；``scopes`` 列出每个 related 作用域中未被
+    唯一引用的 orphan Content-ID 节点。邮件不存在返回 404。
+    """
+
+    msg = database.get_message(conn, message_id)
+    if msg is None:
+        raise _message_404(message_id)
+    rows = database.list_nodes(conn, message_id)
+    report = build_related_resources(rows)
+    return RelatedResourcesResponse(
+        id=message_id,
+        fingerprint=msg["fingerprint"],
+        references=report["references"],
+        scopes=report["scopes"],
     )
 
 

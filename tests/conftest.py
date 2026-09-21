@@ -59,3 +59,63 @@ def text_part(
         + b"\r\n"
     )
     return head + body.encode(charset)
+
+
+def html_part(
+    body: str,
+    charset: str = "utf-8",
+    cte: str | None = None,
+    *,
+    headers: bytes = b"",
+) -> bytes:
+    """构造一个 text/html 部分（用法同 text_part）。"""
+
+    extra = headers
+    cte_header = b""
+    if cte:
+        cte_header = f"Content-Transfer-Encoding: {cte}\r\n".encode()
+    head = (
+        f"Content-Type: text/html; charset={charset}\r\n".encode()
+        + cte_header
+        + extra
+        + b"\r\n"
+    )
+    return head + body.encode(charset)
+
+
+def cid_part(
+    data: bytes,
+    cid: str,
+    *,
+    ctype: str = "image/png",
+    disposition: str = "inline",
+    extra_headers: bytes = b"",
+) -> bytes:
+    """构造一个带 Content-ID 的非文本叶子（默认 base64 inline 图片）。"""
+
+    import base64 as _b64
+
+    head = (
+        f"Content-Type: {ctype}\r\n"
+        f"Content-ID: <{cid}>\r\n"
+        f"Content-Disposition: {disposition}\r\n"
+        f"Content-Transfer-Encoding: base64\r\n"
+    ).encode() + extra_headers + b"\r\n"
+    return head + _b64.b64encode(data)
+
+
+def related_message(
+    parts: list[bytes],
+    boundary: str = "REL",
+    *,
+    subtype: str = "related",
+    extra_headers: bytes = b"",
+) -> bytes:
+    """构造一封 multipart 邮件（默认 multipart/related）。"""
+
+    return (
+        b"Subject: related test\r\n"
+        + extra_headers
+        + f"Content-Type: multipart/{subtype}; boundary={boundary}\r\n\r\n".encode()
+        + make_multipart(parts, boundary)
+    )

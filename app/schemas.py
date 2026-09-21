@@ -85,6 +85,43 @@ class NodeDetailResponse(BaseModel):
     node: NodeDetail
 
 
+class RelatedResourceReference(BaseModel):
+    """text/html 叶子中一条 ``cid:`` 引用的解析结果。
+
+    * ``resolved``：唯一匹配到同作用域内一个 Content-ID 节点；
+    * ``missing``：最近 multipart/related 作用域（或没有作用域）内
+      不存在该 Content-ID；
+    * ``ambiguous``：同作用域内多个节点声明了同一 Content-ID，
+      ``candidate_node_paths`` 列出全部候选。
+    """
+
+    source_node_path: str
+    attribute: str  # src / href / poster / srcset
+    cid: str
+    scope_node_path: Optional[str] = None
+    target_node_path: Optional[str] = None
+    status: str  # resolved / missing / ambiguous
+    candidate_node_paths: list[str] = []
+
+
+class RelatedResourceScope(BaseModel):
+    """一个 multipart/related 作用域的未引用资源清单。
+
+    ``node_path`` 为 ``null`` 的伪作用域收集不属于任何 related 祖先
+    的 Content-ID 节点；它们永远不可能被引用。
+    """
+
+    node_path: Optional[str] = None
+    orphan_node_paths: list[str] = []
+
+
+class RelatedResourcesResponse(BaseModel):
+    id: int
+    fingerprint: str
+    references: list[RelatedResourceReference]
+    scopes: list[RelatedResourceScope]
+
+
 class AttachmentOccurrence(BaseModel):
     """附件的一次出现：哪封邮件的哪个节点、以什么文件名/处置方式。"""
 

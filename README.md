@@ -26,10 +26,11 @@ Content-Transfer-Encoding、字符集、RFC 2047 编码字、RFC 2231 参数）�
 app/
   main.py        FastAPI 路由与启动初始化
   mimeparser.py  严格 MIME/RFC 5322 解析、传输解码、规范化与指纹
+  related.py     text/html 叶子的 cid: 内嵌引用审计（RFC 2392 + related 作用域）
   database.py    SQLite 建表、事务化写入、消息/节点/附件查询
   errors.py      定位到节点的解析错误
   schemas.py     响应模型
-tests/           112 个 pytest 用例（指纹稳定性、损坏输入、附件库、HTTP 端到端）
+tests/           140 个 pytest 用例（指纹稳定性、损坏输入、附件库、cid 审计、HTTP 端到端）
 Dockerfile
 docker-compose.yml
 requirements.txt
@@ -97,6 +98,7 @@ curl -X POST http://localhost:8000/messages \
 | GET | `/messages/{id}/tree` | **嵌套 MIME 树** |
 | GET | `/messages/{id}/nodes` | 全部节点（扁平，children 为路径） |
 | GET | `/messages/{id}/nodes/{path}` | 单个节点详情（头字段、文本/二进制哈希） |
+| GET | `/messages/{id}/related-resources` | 审计 HTML 叶子的 `cid:` 内嵌资源引用与各作用域 orphan |
 | GET | `/attachments` | 附件库列表（分页 + `sha256`/`filename`/`media_type` 过滤） |
 | GET | `/attachments/{sha256}/content` | 下载附件原始解码字节（支持单段 `bytes` Range） |
 
@@ -112,6 +114,82 @@ curl http://localhost:8000/messages/1/nodes/2/1     # 第 2 部分里的封装�
 
 文本叶子的 `text` 是按声明字符集解码、NFC 规范化、换行统一为 `\n`
 后的内容；非文本叶子不回传字节，只给 `blob_sha256` 与 `blob_length`。
+
+## cid: 内嵌资源审计
+
+```bash
+curl http://localhost:8000/messages/1/related-resources
+```
+
+审计每一个 **`text/html` 叶子**（已完成 CTE/字符集解码的规范化文本）
+对 `cid:` 内嵌资源（RFC 2392）的引用：
+
+- 从 `src`、`href`、`poster` 属性以及 `srcset` 的每个候选 URL 中提取
+  `cid:` 引用（scheme 大小写不敏感；`srcset` 按逗号切分、描述符之前的
+  URL 参与匹配）；其余 scheme（`http(s):`、`data:`、相对路径等）忽略；
+- CID 部分按 **RFC 2392 做一次百分号解码**（如 `cid:logo%40x` 解码为
+  `logo@x`；`%E4%BD%A0` 按 UTF-8 还原为 `你`），与同作用域内各节点
+  `Content-ID` 头去掉 `<...>` 包裹后的值**区分大小写**精确匹配；
+- **作用域 = 引用源节点最近的 `multipart/related` 祖先**。匹配只在该
+  作用域内进行：既不向相邻的 sibling `multipart/related` 串联，也不向
+  嵌套的父子 related 作用域（以及反向往外层）串联；
+  `multipart/alternative` / `multipart/mixed` 等不构成作用域，
+  `message/rfc822` 封装层会被穿过（作用域落在被封装报文内部）；
+- 同域内同一个 Content-ID 出现在**多个不同节点**上时，引用判为
+  **`ambiguous`** 并在 `candidate_node_paths` 给出全部候选；作用域内
+  找不到为 **`missing`**；唯一匹配为 **`resolved`**（给出
+  `target_node_path`）；
+- `scopes` 逐作用域列出携带 Content-ID 却从未被任何引用**唯一解析到**
+  的 `orphan_node_paths`（ambiguous 的候选也算未引用）。不属于任何
+  related 祖先的 Content-ID 节点归入 `"node_path": null` 的伪作用域；
+- 邮件不存在返回 **404**。
+
+响应示例：
+
+```json
+{
+  "id": 1,
+  "fingerprint": "58d92498…431",
+  "references": [
+    {
+      "source_node_path": "1",
+      "attribute": "src",
+      "cid": "logo@x",
+      "scope_node_path": "",
+      "target_node_path": "2",
+      "status": "resolved",
+      "candidate_node_paths": []
+    },
+    {
+      "source_node_path": "1",
+      "attribute": "srcset",
+      "cid": "photo@x",
+      "scope_node_path": "",
+      "target_node_path": null,
+      "status": "missing",
+      "candidate_node_paths": []
+    },
+    {
+      "source_node_path": "3/1",
+      "attribute": "src",
+      "cid": "dup@x",
+      "scope_node_path": "3",
+      "target_node_path": null,
+      "status": "ambiguous",
+      "candidate_node_paths": ["3/2", "3/3"]
+    }
+  ],
+  "scopes": [
+    {"node_path": "", "orphan_node_paths": ["4"]},
+    {"node_path": "3", "orphan_node_paths": ["3/2", "3/3"]},
+    {"node_path": null, "orphan_node_paths": ["5"]}
+  ]
+}
+```
+
+字段说明：`scope_node_path` 为引用源的最近 related 祖先路径
+（根 related 为 `""`；无 related 祖先时为 `null`，此时引用必为
+`missing`）。
 
 ## 内容寻址附件库
 
