@@ -111,6 +111,46 @@ class AttachmentListResponse(BaseModel):
     offset: int
 
 
+# ---------------------------------------------------------------------------
+# cid: 内嵌资源引用审计（GET /messages/{id}/related-resources）
+# ---------------------------------------------------------------------------
+
+
+class RelatedReference(BaseModel):
+    """一条来自 text/html 叶子的 ``cid:`` 引用及其解析结果。"""
+
+    source_node_path: str
+    attribute: str  # src / href / poster / srcset
+    cid: str  # RFC 2392 百分号解码后的目标 Content-ID
+    # 最近的 multipart/related 祖先；HTML 不在任何 related 作用域时为 None
+    scope_node_path: Optional[str] = None
+    status: str  # resolved | missing | ambiguous
+    target_node_path: Optional[str] = None  # status == resolved
+    candidates: list[str] = []  # status == ambiguous 时的全部候选节点
+
+
+class RelatedOrphan(BaseModel):
+    """作用域内声明了 Content-ID 却未被该作用域 HTML 引用的节点。"""
+
+    node_path: str
+    content_type: str
+    content_ids: list[str]
+
+
+class RelatedScope(BaseModel):
+    """一个 multipart/related 容器的审计侧影。"""
+
+    node_path: str
+    orphans: list[RelatedOrphan]
+
+
+class RelatedResourcesResponse(BaseModel):
+    id: int
+    fingerprint: str
+    references: list[RelatedReference]
+    scopes: list[RelatedScope]
+
+
 class ErrorBody(BaseModel):
     code: str
     message: str

@@ -26,10 +26,12 @@ Content-Transfer-Encoding、字符集、RFC 2047 编码字、RFC 2231 参数）�
 app/
   main.py        FastAPI 路由与启动初始化
   mimeparser.py  严格 MIME/RFC 5322 解析、传输解码、规范化与指纹
+  related.py     cid: 内嵌资源引用审计（RFC 2392，multipart/related 作用域）
   database.py    SQLite 建表、事务化写入、消息/节点/附件查询
   errors.py      定位到节点的解析错误
   schemas.py     响应模型
-tests/           112 个 pytest 用例（指纹稳定性、损坏输入、附件库、HTTP 端到端）
+tests/           138 个 pytest 用例（指纹稳定性、损坏输入、附件库、
+                 cid 引用审计、HTTP 端到端）
 Dockerfile
 docker-compose.yml
 requirements.txt
@@ -97,6 +99,7 @@ curl -X POST http://localhost:8000/messages \
 | GET | `/messages/{id}/tree` | **嵌套 MIME 树** |
 | GET | `/messages/{id}/nodes` | 全部节点（扁平，children 为路径） |
 | GET | `/messages/{id}/nodes/{path}` | 单个节点详情（头字段、文本/二进制哈希） |
+| GET | `/messages/{id}/related-resources` | 审计 HTML 对 `cid:` 内嵌资源的引用（见下） |
 | GET | `/attachments` | 附件库列表（分页 + `sha256`/`filename`/`media_type` 过滤） |
 | GET | `/attachments/{sha256}/content` | 下载附件原始解码字节（支持单段 `bytes` Range） |
 
@@ -112,6 +115,80 @@ curl http://localhost:8000/messages/1/nodes/2/1     # 第 2 部分里的封装�
 
 文本叶子的 `text` 是按声明字符集解码、NFC 规范化、换行统一为 `\n`
 后的内容；非文本叶子不回传字节，只给 `blob_sha256` 与 `blob_length`。
+
+## `cid:` 内嵌资源引用审计
+
+```bash
+curl http://localhost:8000/messages/1/related-resources
+```
+
+审计归档邮件 HTML 对 `multipart/related`（RFC 2387）内
+`Content-ID` 资源的 `cid:` 引用：
+
+- 从每个 **text/html 叶子** 的 `src`、`href`、`poster`、`srcset`
+  属性（按 HTML 文档序，`srcset` 支持多个候选）提取 `cid:` 引用，
+  按 **RFC 2392 §2 百分号解码**（如 `cid:logo%40x.com` →
+  `logo@x.com`），`cid:` scheme 大小写不敏感；
+- 作用域严格限定为该 HTML 叶子 **最近的 `multipart/related`
+  祖先**：只在该祖先的后代中匹配 `Content-ID`，**不向相邻兄弟
+  作用域、也不向内层嵌套作用域串联**（`multipart/mixed` 等其他
+  容器对作用域判定透明）；
+- 每条引用给出源 `source_node_path`、状态与目标：
+  - `resolved` —— 作用域内唯一命中，附 `target_node_path`；
+  - `missing` —— 作用域内无对应 `Content-ID`（HTML 不在任何
+    related 作用域时同样判 missing，`scope_node_path` 为 `null`）；
+  - `ambiguous` —— **同作用域内重复 Content-ID**，附全部
+    `candidates` 节点路径（跨不同作用域的同名 ID 合法，不算歧义）；
+- `scopes` 按文档序列出每个 `multipart/related` 作用域中未被本作用域
+  HTML 引用的 `Content-ID` 节点（`orphans`）；
+- `Content-ID` 头规范化时剥掉 RFC 2045 的一层尖括号（`"<foo>"` →
+  `foo`，裸 ID 按字面接受），`cid:<foo>` 与
+  `cid:%3Cfoo%3E` 也做对称容忍；
+- 邮件不存在返回 **404**。
+
+响应示例：
+
+```json
+{
+  "id": 1,
+  "fingerprint": "defeef89…299c40",
+  "references": [
+    {
+      "source_node_path": "1",
+      "attribute": "src",
+      "cid": "logo@x.com",
+      "scope_node_path": "",
+      "status": "resolved",
+      "target_node_path": "2",
+      "candidates": []
+    },
+    {
+      "source_node_path": "1",
+      "attribute": "src",
+      "cid": "missing@x.com",
+      "scope_node_path": "",
+      "status": "missing",
+      "target_node_path": null,
+      "candidates": []
+    }
+  ],
+  "scopes": [
+    {
+      "node_path": "",
+      "orphans": [
+        {
+          "node_path": "3",
+          "content_type": "image/gif",
+          "content_ids": ["orphan@x.com"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`ambiguous` 时 `target_node_path` 为 `null`，`candidates` 列出同作用域
+所有同 ID 节点；歧义候选视为“已被引用”，不会再出现在 `orphans` 中。
 
 ## 内容寻址附件库
 

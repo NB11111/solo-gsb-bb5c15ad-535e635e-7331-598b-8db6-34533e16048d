@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from . import database
 from .errors import MIMEParseError
 from .mimeparser import fingerprint, parse_message, raw_sha256
+from .related import audit_related_resources
 from .schemas import (
     AttachmentListResponse,
     AttachmentOccurrence,
@@ -28,6 +29,10 @@ from .schemas import (
     NodeDetailResponse,
     NodeListResponse,
     NodeSummary,
+    RelatedOrphan,
+    RelatedReference,
+    RelatedResourcesResponse,
+    RelatedScope,
     TreeNode,
     TreeResponse,
 )
@@ -57,9 +62,11 @@ app = FastAPI(
         "叶子内容生成稳定指纹并入库。相同内容不同换行/头字段大小写"
         "得到同一指纹；损坏输入返回定位到节点的 422 错误且不写入。"
         "非文本叶子的解码字节按 SHA-256 去重进入内容寻址附件库，"
-        "支持分页检索与带 Range 的下载。"
+        "支持分页检索与带 Range 的下载。另提供 /messages/{id}/"
+        "related-resources 审计 text/html 对 cid: 内嵌资源的引用，"
+        "以最近 multipart/related 祖先为作用域匹配 Content-ID。"
     ),
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -280,6 +287,65 @@ def get_node(
     )
     return NodeDetailResponse(
         id=message_id, fingerprint=msg["fingerprint"], node=detail
+    )
+
+
+# ---------------------------------------------------------------------------
+# cid: 内嵌资源引用审计
+# ---------------------------------------------------------------------------
+
+
+@app.get(
+    "/messages/{message_id}/related-resources",
+    response_model=RelatedResourcesResponse,
+)
+def get_related_resources(
+    message_id: int,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> RelatedResourcesResponse:
+    """审计归档邮件 HTML 对 ``cid:`` 内嵌资源的引用。
+
+    从每个 **text/html 叶子** 的 ``src`` / ``href`` / ``poster`` /
+    ``srcset`` 属性按文档序提取 ``cid:`` 引用，RFC 2392 百分号解码后，
+    以该叶子 **最近的 ``multipart/related`` 祖先**为唯一作用域匹配
+    ``Content-ID``：
+
+    * 唯一命中 → ``resolved``（给 ``target_node_path``）；
+    * 同作用域重复 Content-ID → ``ambiguous``（给全部 ``candidates``）；
+    * 无命中或 HTML 不在任何 related 作用域 → ``missing``；
+    * 不跨相邻兄弟作用域、也不向内层嵌套作用域串联。
+
+    响应的 ``scopes`` 按文档序列出每个 multipart/related 作用域中
+    未被引用的 Content-ID 节点（orphan）。邮件不存在返回 404。
+    """
+
+    msg = database.get_message(conn, message_id)
+    if msg is None:
+        raise _message_404(message_id)
+    rows = database.list_nodes(conn, message_id)
+    refs, scopes = audit_related_resources(rows)
+    return RelatedResourcesResponse(
+        id=message_id,
+        fingerprint=msg["fingerprint"],
+        references=[
+            RelatedReference(
+                source_node_path=r.source_node_path,
+                attribute=r.attribute,
+                cid=r.cid,
+                scope_node_path=r.scope_node_path,
+                status=r.status,
+                target_node_path=r.target_node_path,
+                candidates=r.candidates,
+            )
+            for r in refs
+        ],
+        scopes=[
+            RelatedScope(
+                node_path=s["node_path"],
+                orphans=[RelatedOrphan(**o) for o in s["orphans"]],
+            )
+            for s in scopes
+        ],
     )
 
 
